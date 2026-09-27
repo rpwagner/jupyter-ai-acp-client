@@ -1,6 +1,7 @@
 """Tests for content block building and session management in JaiAcpClient."""
 
 import asyncio
+import base64
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +13,7 @@ from acp.schema import (
     AvailableCommandsUpdate,
     ConfigOptionUpdate,
     CurrentModeUpdate,
+    ImageContentBlock,
     ResourceContentBlock,
     TextContentBlock,
     Usage,
@@ -243,6 +245,106 @@ class TestPromptAndReplyContentBlocks:
 
         blocks = conn.prompt.call_args.kwargs["prompt"]
         assert blocks[1].uri == "../../../etc/passwd"
+
+    @pytest.mark.parametrize(
+        ("filename", "mime_type", "header"),
+        [
+            ("image.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+            ("image.jpg", "image/jpeg", b"\xff\xd8\xff"),
+            ("image.gif", "image/gif", b"GIF89a"),
+            ("image.webp", "image/webp", b"RIFF\x04\x00\x00\x00WEBP"),
+        ],
+    )
+    async def test_jupyter_image_is_sent_as_acp_image(
+        self, tmp_path, filename, mime_type, header
+    ):
+        client, conn, _ = _make_client_and_persona()
+        client.get_agent_capabilities = AsyncMock(
+            return_value=MagicMock(prompt_capabilities=MagicMock(image=True))
+        )
+        image = header + b"test"
+        (tmp_path / filename).write_bytes(image)
+
+        await client.prompt_and_reply(
+            session_id=SESSION_ID,
+            prompt="describe",
+            attachments=[FileAttachment(value=filename, mimetype=mime_type)],
+            root_dir=str(tmp_path),
+        )
+
+        blocks = conn.prompt.call_args.kwargs["prompt"]
+        assert isinstance(blocks[1], ImageContentBlock)
+        assert blocks[1].mime_type == mime_type
+        assert base64.b64decode(blocks[1].data) == image
+
+    async def test_image_without_agent_support_fails_before_prompt(self, tmp_path):
+        client, conn, _ = _make_client_and_persona()
+        client.get_agent_capabilities = AsyncMock(
+            return_value=MagicMock(prompt_capabilities=MagicMock(image=False))
+        )
+        (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        with pytest.raises(ValueError, match="does not support image"):
+            await client.prompt_and_reply(
+                session_id=SESSION_ID,
+                prompt="describe",
+                attachments=[FileAttachment(value="image.png", mimetype="image/png")],
+                root_dir=str(tmp_path),
+            )
+        conn.prompt.assert_not_called()
+
+    @pytest.mark.parametrize("value", ["../outside.png", "/tmp/outside.png", "escape.png"])
+    async def test_image_cannot_escape_jupyter_root(self, tmp_path, value):
+        client, conn, _ = _make_client_and_persona()
+        client.get_agent_capabilities = AsyncMock(
+            return_value=MagicMock(prompt_capabilities=MagicMock(image=True))
+        )
+        (tmp_path.parent / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (tmp_path / "escape.png").symlink_to(tmp_path.parent / "outside.png")
+
+        with pytest.raises(ValueError, match="Jupyter root"):
+            await client.prompt_and_reply(
+                session_id=SESSION_ID,
+                prompt="describe",
+                attachments=[FileAttachment(value=value, mimetype="image/png")],
+                root_dir=str(tmp_path),
+            )
+        conn.prompt.assert_not_called()
+
+    async def test_image_mime_mismatch_is_rejected(self, tmp_path):
+        client, conn, _ = _make_client_and_persona()
+        client.get_agent_capabilities = AsyncMock(
+            return_value=MagicMock(prompt_capabilities=MagicMock(image=True))
+        )
+        (tmp_path / "image.png").write_bytes(b"not an image")
+
+        with pytest.raises(ValueError, match="supported image type"):
+            await client.prompt_and_reply(
+                session_id=SESSION_ID,
+                prompt="describe",
+                attachments=[FileAttachment(value="image.png", mimetype="image/png")],
+                root_dir=str(tmp_path),
+            )
+        conn.prompt.assert_not_called()
+
+    async def test_oversized_image_is_rejected(self, tmp_path):
+        client, conn, _ = _make_client_and_persona()
+        client.get_agent_capabilities = AsyncMock(
+            return_value=MagicMock(prompt_capabilities=MagicMock(image=True))
+        )
+        image = tmp_path / "image.png"
+        with image.open("wb") as image_file:
+            image_file.write(b"\x89PNG\r\n\x1a\n")
+            image_file.truncate(20 * 1024 * 1024 + 1)
+
+        with pytest.raises(ValueError, match="20 MiB"):
+            await client.prompt_and_reply(
+                session_id=SESSION_ID,
+                prompt="describe",
+                attachments=[FileAttachment(value="image.png", mimetype="image/png")],
+                root_dir=str(tmp_path),
+            )
+        conn.prompt.assert_not_called()
 
 
 def _real_usage_persona():
