@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 from pathlib import Path
 from typing import Any, Awaitable
@@ -64,6 +65,50 @@ from .tool_call_renderer import ensure_serializable, extract_diffs, extract_diff
 from .permission_manager import PermissionManager
 
 import traceback as tb_mod
+
+_IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def _image_mime_type(data: bytes) -> str | None:
+    """Identify the supported raster formats without trusting attachment metadata."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _image_attachment_block(
+    value: str, mime_type: str | None, root_dir: str | None
+) -> ImageContentBlock:
+    """Read an image attachment only within the Jupyter server's root directory."""
+    if not root_dir or not value or Path(value).is_absolute():
+        raise ValueError("Image attachments require a path relative to the Jupyter root")
+    root = Path(root_dir).resolve(strict=True)
+    path = (root / value).resolve(strict=True)
+    if not path.is_relative_to(root) or not path.is_file():
+        raise ValueError("Image attachment must be a file inside the Jupyter root")
+    with path.open("rb") as image_file:
+        data = image_file.read(_MAX_IMAGE_BYTES + 1)
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise ValueError("Image attachment exceeds the 20 MiB limit")
+    actual_type = _image_mime_type(data)
+    if actual_type is None or (mime_type is not None and actual_type != mime_type):
+        raise ValueError("Image attachment content does not match a supported image type")
+    return ImageContentBlock(
+        type="image", data=base64.b64encode(data).decode("ascii"), mime_type=actual_type
+    )
 
 class JaiAcpClient(Client):
     """
@@ -278,14 +323,32 @@ class JaiAcpClient(Client):
             persona.set_status()
 
             try:
-                # Build content blocks: text prompt + optional attachment resources
-                content_blocks: list[TextContentBlock | ResourceContentBlock] = [
+                # Build content blocks: text prompt + optional attachment resources/images
+                content_blocks: list[
+                    TextContentBlock | ResourceContentBlock | ImageContentBlock
+                ] = [
                     TextContentBlock(text=prompt, type="text"),
                 ]
                 if attachments:
                     for att in attachments:
                         att_value = att.value or ""
                         att_type = att.type
+
+                        # Only Jupyter file attachments with supported raster image
+                        # types become ACP images. Other attachments retain their
+                        # existing resource-link behavior.
+                        mime_type = att.mimetype
+                        image_type = _IMAGE_MIME_TYPES.get(Path(att_value).suffix.lower())
+                        if att_type == "file" and (
+                            mime_type in _IMAGE_MIME_TYPES.values() or image_type
+                        ):
+                            capabilities = await self.get_agent_capabilities()
+                            if not capabilities.prompt_capabilities.image:
+                                raise ValueError("This agent does not support image attachments")
+                            content_blocks.append(
+                                _image_attachment_block(att_value, mime_type, root_dir)
+                            )
+                            continue
 
                         # Resolve to absolute file:// URI when root_dir is available
                         if root_dir and att_value:
@@ -304,7 +367,6 @@ class JaiAcpClient(Client):
                             uri = att_value
 
                         # Determine MIME type: explicit value or notebook default
-                        mime_type = att.mimetype
                         if mime_type is None and att_type == "notebook":
                             mime_type = "application/x-ipynb+json"
 
