@@ -1,15 +1,15 @@
 {
     "name": "@jupyter-ai/acp-client",
-    "version": "0.3.1-a2",
+    "version": "0.3.1-a2.dev166",
     "description": "The ACP client for Jupyter AI, allowing for ACP agents to be used in JupyterLab",
     "keywords": [
         "jupyter",
         "jupyterlab",
         "jupyterlab-extension"
     ],
-    "homepage": "https://github.com/jupyter-ai-contrib/jupyter-ai-acp-client",
+    "homepage": "https://github.com/rpwagner/jupyter-ai-acp-client",
     "bugs": {
-        "url": "https://github.com/jupyter-ai-contrib/jupyter-ai-acp-client/issues"
+        "url": "https://github.com/rpwagner/jupyter-ai-acp-client/issues"
     },
     "license": "BSD-3-Clause",
     "author": {
@@ -26,7 +26,7 @@
     "style": "style/index.css",
     "repository": {
         "type": "git",
-        "url": "https://github.com/jupyter-ai-contrib/jupyter-ai-acp-client.git"
+        "url": "https://github.com/rpwagner/jupyter-ai-acp-client.git"
     },
     "scripts": {
         "build": "jlpm build:lib && jlpm build:labextension:dev",
